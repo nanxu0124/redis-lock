@@ -77,3 +77,70 @@ func TestTryLock(t *testing.T) {
 		})
 	}
 }
+
+func TestUnlock(t *testing.T) {
+	ctx := context.Background()
+	client := redis.NewClient(&redis.Options{
+		Addr: "localhost:6379",
+	})
+
+	lockClient := &Client{client: client}
+
+	testCases := []struct {
+		name       string
+		key        string
+		value      string
+		expiration time.Duration
+		wantErr    error
+		before     func() *Lock
+		after      func()
+	}{
+		{
+			// 解锁成功
+			name:       "unlocked success",
+			key:        "unlocked-success-key",
+			expiration: 5 * time.Second,
+			before: func() *Lock {
+				// 提前设置好分布式锁
+				lock, err := lockClient.TryLock(ctx, "unlocked-success-key", 5*time.Second)
+				require.NoError(t, err)
+				return lock
+			},
+			after: func() {
+				// 最后应该没有这个 key 的锁
+				res, err := client.Exists(context.Background(), "unlocked-success-key").Result()
+				require.NoError(t, err)
+				require.Equal(t, int64(0), res)
+			},
+			wantErr: nil,
+		},
+		{
+			// 未持有锁
+			name:       "lock not hold",
+			key:        "a-not-hold-key",
+			expiration: 5 * time.Second,
+			before: func() *Lock {
+				// 提前设置好分布式锁
+				// 设置好的 key 和当前要解锁的不一样
+				lock, err := lockClient.TryLock(ctx, "another-key", 5*time.Second)
+				require.NoError(t, err)
+				return lock
+			},
+			after: func() {
+				res, err := client.Del(ctx, "another-key").Result()
+				require.NoError(t, err)
+				require.Equal(t, int64(1), res)
+			},
+			wantErr: ErrLockNotHold,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			lock := tc.before()
+			err := lock.Unlock(ctx, tc.key)
+			require.Equal(t, tc.wantErr, err)
+			tc.after()
+		})
+	}
+}
